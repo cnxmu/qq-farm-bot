@@ -1,4 +1,4 @@
-import { useStorage } from '@vueuse/core'
+import { useSessionStorage } from '@vueuse/core'
 import axios from 'axios'
 import NProgress from 'nprogress'
 import { createRouter, createWebHistory } from 'vue-router'
@@ -7,7 +7,7 @@ import 'nprogress/nprogress.css'
 
 NProgress.configure({ showSpinner: false })
 
-const adminToken = useStorage('admin_token', '')
+const adminToken = useSessionStorage('admin_token', '')
 let validatedToken = ''
 let validatingPromise: Promise<boolean> | null = null
 

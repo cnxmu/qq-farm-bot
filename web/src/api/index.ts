@@ -1,8 +1,8 @@
-import { useStorage } from '@vueuse/core'
+import { useSessionStorage, useStorage } from '@vueuse/core'
 import axios from 'axios'
 import { useToastStore } from '@/stores/toast'
 
-const tokenRef = useStorage('admin_token', '')
+const tokenRef = useSessionStorage('admin_token', '')
 const accountIdRef = useStorage('current_account_id', '')
 
 const api = axios.create({

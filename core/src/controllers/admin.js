@@ -7,14 +7,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const process = require('node:process');
 const express = require('express');
-const { Server: SocketIOServer } = require('socket.io');
 const { version } = require('../../package.json');
 const { CONFIG } = require('../config/config');
 const { getLevelExpProgress } = require('../config/gameConfig');
 const { getResourcePath } = require('../config/runtime-paths');
 const store = require('../models/store');
-const { addOrUpdateAccount, deleteAccount } = store;
-const { findAccountByRef, normalizeAccountRef, resolveAccountId } = require('../services/account-resolver');
+const { normalizeAccountRef, resolveAccountId } = require('../services/account-resolver');
 const { createModuleLogger } = require('../services/logger');
 const { MiniProgramLoginSession } = require('../services/qrlogin');
 const { sendPushooMessage } = require('../services/push');
@@ -22,7 +20,10 @@ const { createSessionStore } = require('../services/session-store');
 const { createAdminAuthService } = require('../services/admin-auth');
 const { getSchedulerRegistrySnapshot } = require('../services/scheduler');
 const { registerAuthRoutes } = require('./routes/auth');
+const { registerAccountRoutes } = require('./routes/accounts');
+const { registerLogRoutes } = require('./routes/logs');
 const { registerQrRoutes } = require('./routes/qr');
+const { startAdminSocketServer } = require('./socket');
 const { 
     hashPassword: secureHash, 
     verifyPassword,
@@ -371,30 +372,12 @@ function startAdminServer(dataProvider) {
         }
     });
 
-    // API: 启动账号
-    app.post('/api/accounts/:id/start', (req, res) => {
-        try {
-            const ok = provider.startAccount(resolveAccId(req.params.id));
-            if (!ok) {
-                return res.status(404).json({ ok: false, error: 'Account not found' });
-            }
-            res.json({ ok: true });
-        } catch (e) {
-            res.status(500).json({ ok: false, error: e.message });
-        }
-    });
-
-    // API: 停止账号
-    app.post('/api/accounts/:id/stop', (req, res) => {
-        try {
-            const ok = provider.stopAccount(resolveAccId(req.params.id));
-            if (!ok) {
-                return res.status(404).json({ ok: false, error: 'Account not found' });
-            }
-            res.json({ ok: true });
-        } catch (e) {
-            res.status(500).json({ ok: false, error: e.message });
-        }
+    registerAccountRoutes({
+        app,
+        provider,
+        store,
+        resolveAccId,
+        getAccountList,
     });
 
     // API: 农场一键操作
@@ -518,168 +501,13 @@ function startAdminServer(dataProvider) {
     });
 
     // API: 账号管理
-    app.get('/api/accounts', (req, res) => {
-        try {
-            const data = provider.getAccounts();
-            res.json({ ok: true, data });
-        } catch (e) {
-            res.status(500).json({ ok: false, error: e.message });
-        }
-    });
-
-    // API: 更新账号备注（兼容旧接口）
-    app.post('/api/account/remark', (req, res) => {
-        try {
-            const body = (req.body && typeof req.body === 'object') ? req.body : {};
-            const rawRef = body.id || body.accountId || body.uin || req.headers['x-account-id'];
-            const accountList = getAccountList();
-            const target = findAccountByRef(accountList, rawRef);
-            if (!target || !target.id) {
-                return res.status(404).json({ ok: false, error: 'Account not found' });
-            }
-
-            const remark = String(body.remark !== undefined ? body.remark : body.name || '').trim();
-            if (!remark) {
-                return res.status(400).json({ ok: false, error: 'Missing remark' });
-            }
-
-            const accountId = String(target.id);
-            const data = addOrUpdateAccount({ id: accountId, name: remark });
-            if (provider && typeof provider.setRuntimeAccountName === 'function') {
-                provider.setRuntimeAccountName(accountId, remark);
-            }
-            if (provider && provider.addAccountLog) {
-                provider.addAccountLog('update', `更新账号备注: ${remark}`, accountId, remark);
-            }
-            res.json({ ok: true, data });
-        } catch (e) {
-            res.status(500).json({ ok: false, error: e.message });
-        }
-    });
-
-    app.post('/api/accounts', (req, res) => {
-        try {
-            const body = (req.body && typeof req.body === 'object') ? req.body : {};
-            const isUpdate = !!body.id;
-            const resolvedUpdateId = isUpdate ? resolveAccId(body.id) : '';
-            const payload = isUpdate ? { ...body, id: resolvedUpdateId || String(body.id) } : body;
-            let wasRunning = false;
-            if (isUpdate && provider.isAccountRunning) {
-                wasRunning = provider.isAccountRunning(payload.id);
-            }
-
-            // 检查是否仅修改了备注信息
-            let onlyRemarkChanged = false;
-            if (isUpdate) {
-                const oldAccounts = provider.getAccounts();
-                const oldAccount = oldAccounts.accounts.find(a => a.id === payload.id);
-                if (oldAccount) {
-                    // 检查 payload 中是否只包含 id 和 name 字段
-                    const payloadKeys = Object.keys(payload);
-                    const onlyIdAndName = payloadKeys.length === 2 && payloadKeys.includes('id') && payloadKeys.includes('name');
-                    if (onlyIdAndName) {
-                        onlyRemarkChanged = true;
-                    }
-                }
-            }
-
-            const data = addOrUpdateAccount(payload);
-            if (provider.addAccountLog) {
-                const accountId = isUpdate ? String(payload.id) : String((data.accounts[data.accounts.length - 1] || {}).id || '');
-                const accountName = payload.name || '';
-                provider.addAccountLog(
-                    isUpdate ? 'update' : 'add',
-                    isUpdate ? `更新账号: ${accountName || accountId}` : `添加账号: ${accountName || accountId}`,
-                    accountId,
-                    accountName
-                );
-            }
-            // 如果是新增，自动启动
-            if (!isUpdate) {
-                const newAcc = data.accounts[data.accounts.length - 1];
-                if (newAcc) provider.startAccount(newAcc.id);
-            } else if (wasRunning && !onlyRemarkChanged) {
-                // 如果是更新，且之前在运行，且不是仅修改备注，则重启
-                provider.restartAccount(payload.id);
-            }
-            res.json({ ok: true, data });
-        } catch (e) {
-            res.status(500).json({ ok: false, error: e.message });
-        }
-    });
-
-    app.delete('/api/accounts/:id', (req, res) => {
-        try {
-            const resolvedId = resolveAccId(req.params.id) || String(req.params.id || '');
-            const before = provider.getAccounts();
-            const target = findAccountByRef(before.accounts || [], req.params.id);
-            provider.stopAccount(resolvedId);
-            const data = deleteAccount(resolvedId);
-            if (provider.addAccountLog) {
-                provider.addAccountLog('delete', `删除账号: ${(target && target.name) || req.params.id}`, resolvedId, target ? target.name : '');
-            }
-            res.json({ ok: true, data });
-        } catch (e) {
-            res.status(500).json({ ok: false, error: e.message });
-        }
-    });
-
-    // API: 账号日志
-    app.get('/api/account-logs', (req, res) => {
-        try {
-            const limit = Number.parseInt(req.query.limit) || 100;
-            const list = provider.getAccountLogs ? provider.getAccountLogs(limit) : [];
-            // 与当前 web 前端保持一致：直接返回数组
-            res.json(Array.isArray(list) ? list : []);
-        } catch (e) {
-            res.status(500).json({ ok: false, error: e.message });
-        }
-    });
-
-    // API: 日志
-    app.get('/api/logs', (req, res) => {
-        const queryAccountIdRaw = (req.query.accountId || '').toString().trim();
-        const id = queryAccountIdRaw ? (queryAccountIdRaw === 'all' ? '' : resolveAccId(queryAccountIdRaw)) : getAccId(req);
-        const options = {
-            limit: Number.parseInt(req.query.limit) || 100,
-            tag: req.query.tag || '',
-            module: req.query.module || '',
-            event: req.query.event || '',
-            keyword: req.query.keyword || '',
-            isWarn: req.query.isWarn,
-            timeFrom: req.query.timeFrom || '',
-            timeTo: req.query.timeTo || '',
-        };
-        const list = provider.getLogs(id, options);
-        res.json({ ok: true, data: list });
-    });
-
-    // API: 清空当前账号运行日志
-    app.delete('/api/logs', (req, res) => {
-        const id = getAccId(req);
-        if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
-
-        try {
-            const data = provider.clearLogs(id);
-
-            if (io && provider && typeof provider.getLogs === 'function') {
-                const accountLogs = provider.getLogs(id, { limit: 100 });
-                io.to(`account:${id}`).emit('logs:snapshot', {
-                    accountId: id,
-                    logs: Array.isArray(accountLogs) ? accountLogs : [],
-                });
-
-                const allLogs = provider.getLogs('', { limit: 100 });
-                io.to('account:all').emit('logs:snapshot', {
-                    accountId: 'all',
-                    logs: Array.isArray(allLogs) ? allLogs : [],
-                });
-            }
-
-            res.json({ ok: true, data });
-        } catch (e) {
-            handleApiError(res, e);
-        }
+    registerLogRoutes({
+        app,
+        provider,
+        getAccId,
+        resolveAccId,
+        handleApiError,
+        getIO: () => io,
     });
 
     registerQrRoutes({
@@ -700,93 +528,19 @@ function startAdminServer(dataProvider) {
         }
     });
 
-    const applySocketSubscription = (socket, accountRef = '') => {
-        const incoming = String(accountRef || '').trim();
-        const resolved = incoming && incoming !== 'all' ? resolveAccId(incoming) : '';
-        for (const room of socket.rooms) {
-            if (room.startsWith('account:')) socket.leave(room);
-        }
-        if (resolved) {
-            socket.join(`account:${resolved}`);
-            socket.data.accountId = resolved;
-        } else {
-            socket.join('account:all');
-            socket.data.accountId = '';
-        }
-        socket.emit('subscribed', { accountId: socket.data.accountId || 'all' });
-
-        try {
-            const targetId = socket.data.accountId || '';
-            if (targetId && provider && typeof provider.getStatus === 'function') {
-                const currentStatus = provider.getStatus(targetId);
-                socket.emit('status:update', { accountId: targetId, status: currentStatus });
-            }
-            if (provider && typeof provider.getLogs === 'function') {
-                const currentLogs = provider.getLogs(targetId, { limit: 100 });
-                socket.emit('logs:snapshot', {
-                    accountId: targetId || 'all',
-                    logs: Array.isArray(currentLogs) ? currentLogs : [],
-                });
-            }
-            if (provider && typeof provider.getAccountLogs === 'function') {
-                const currentAccountLogs = provider.getAccountLogs(100);
-                socket.emit('account-logs:snapshot', {
-                    logs: Array.isArray(currentAccountLogs) ? currentAccountLogs : [],
-                });
-            }
-        } catch {
-            // ignore snapshot push errors
-        }
-    };
-
     const port = CONFIG.adminPort || 3000;
     server = app.listen(port, '0.0.0.0', () => {
         adminLogger.info('admin panel started', { url: `http://localhost:${port}`, port });
     });
 
-    io = new SocketIOServer(server, {
-        path: '/socket.io',
-        cors: {
-            origin: (origin, callback) => {
-                if (isOriginAllowed(origin)) return callback(null, true);
-                return callback(new Error('Origin not allowed'));
-            },
-            methods: ['GET', 'POST'],
-            allowedHeaders: ['x-admin-token', 'x-account-id'],
-        },
+    io = startAdminSocketServer({
+        server,
+        isOriginAllowed,
+        authService,
+        provider,
+        resolveAccId,
     });
 
-    io.use((socket, next) => {
-        const authToken = socket.handshake.auth && socket.handshake.auth.token
-            ? String(socket.handshake.auth.token)
-            : '';
-        const headerToken = socket.handshake.headers && socket.handshake.headers['x-admin-token']
-            ? String(socket.handshake.headers['x-admin-token'])
-            : '';
-        const token = authToken || headerToken;
-        const origin = normalizeOrigin(socket.handshake.headers && socket.handshake.headers.origin);
-        if (!isOriginAllowed(origin)) {
-            return next(new Error('Origin not allowed'));
-        }
-        if (!token || !authService.getTokenMeta(token)) {
-            return next(new Error('Unauthorized'));
-        }
-        socket.data.adminToken = token;
-        return next();
-    });
-
-    io.on('connection', (socket) => {
-        const initialAccountRef = (socket.handshake.auth && socket.handshake.auth.accountId)
-            || (socket.handshake.query && socket.handshake.query.accountId)
-            || '';
-        applySocketSubscription(socket, initialAccountRef);
-        socket.emit('ready', { ok: true, ts: Date.now() });
-
-        socket.on('subscribe', (payload) => {
-            const body = (payload && typeof payload === 'object') ? payload : {};
-            applySocketSubscription(socket, body.accountId || '');
-        });
-    });
 }
 
 module.exports = {

@@ -1,5 +1,5 @@
 import type { Socket } from 'socket.io-client'
-import { useStorage } from '@vueuse/core'
+import { useSessionStorage } from '@vueuse/core'
 import { defineStore } from 'pinia'
 import { io } from 'socket.io-client'
 import { ref } from 'vue'
@@ -33,7 +33,7 @@ export const useStatusStore = defineStore('status', () => {
   const realtimeConnected = ref(false)
   const realtimeLogsEnabled = ref(true)
   const currentRealtimeAccountId = ref('')
-  const tokenRef = useStorage('admin_token', '')
+  const tokenRef = useSessionStorage('admin_token', '')
 
   let socket: Socket | null = null
 

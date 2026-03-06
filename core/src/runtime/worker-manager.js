@@ -1,5 +1,23 @@
 const { createScheduler } = require('../services/scheduler');
 
+const DEFAULT_API_POLICY = {
+    timeoutMs: 10000,
+    retries: 0,
+};
+
+const API_POLICY_MAP = {
+    getFriendLands: { timeoutMs: 15000, retries: 1 },
+    getFriends: { timeoutMs: 15000, retries: 1 },
+    getBag: { timeoutMs: 15000, retries: 1 },
+    getAnalytics: { timeoutMs: 20000, retries: 0 },
+    getSchedulers: { timeoutMs: 15000, retries: 0 },
+};
+
+function getApiPolicy(method) {
+    const key = String(method || '');
+    return API_POLICY_MAP[key] || DEFAULT_API_POLICY;
+}
+
 function createWorkerManager(options) {
     const {
         fork,
@@ -326,19 +344,35 @@ function createWorkerManager(options) {
         const worker = workers[accountId];
         if (!worker) return Promise.reject(new Error('账号未运行'));
 
+        const { timeoutMs, retries } = getApiPolicy(method);
+
         return new Promise((resolve, reject) => {
             const id = worker.reqId++;
-            worker.requests.set(id, { resolve, reject });
+            const timeoutKey = `api_timeout_${accountId}_${id}`;
 
-            // 超时处理
-            managerScheduler.setTimeoutTask(`api_timeout_${accountId}_${id}`, 10000, () => {
-                if (worker.requests.has(id)) {
+            const sendRequest = () => {
+                if (!workers[accountId]) {
+                    worker.requests.delete(id);
+                    return reject(new Error('账号未运行'));
+                }
+
+                managerScheduler.setTimeoutTask(timeoutKey, timeoutMs, () => {
+                    const pending = worker.requests.get(id);
+                    if (!pending) return;
+                    if (pending.retriesLeft > 0) {
+                        pending.retriesLeft -= 1;
+                        sendRequest();
+                        return;
+                    }
                     worker.requests.delete(id);
                     reject(new Error('API Timeout'));
-                }
-            });
+                });
 
-            worker.process.send({ type: 'api_call', id, method, args });
+                worker.process.send({ type: 'api_call', id, method, args });
+            };
+
+            worker.requests.set(id, { resolve, reject, retriesLeft: retries });
+            sendRequest();
         });
     }
 

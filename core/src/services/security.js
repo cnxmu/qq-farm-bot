@@ -78,7 +78,7 @@ async function verifyPassword(password, storedHash) {
                         logger.error('PBKDF2验证失败', { error: err.message });
                         resolve(false);
                     } else {
-                        resolve(derivedKey.toString('hex') === hash);
+                        resolve(timingSafeEqualHex(derivedKey.toString('hex'), hash));
                     }
                 });
             });
@@ -106,9 +106,21 @@ function hashPasswordSHA256(password) {
 function verifyPasswordSHA256(password, storedHash) {
     if (typeof storedHash !== 'string' || storedHash.length !== 64) return false;
     const hash = hashPasswordSHA256(password);
+    if (hash.length !== storedHash.length) return false;
     return crypto.timingSafeEqual(
-        Buffer.from(hash),
-        Buffer.from(storedHash)
+        Buffer.from(hash, 'hex'),
+        Buffer.from(storedHash, 'hex')
+    );
+}
+
+function timingSafeEqualHex(left, right) {
+    const lhs = String(left || '');
+    const rhs = String(right || '');
+    if (!/^[a-f0-9]+$/i.test(lhs) || !/^[a-f0-9]+$/i.test(rhs)) return false;
+    if (lhs.length !== rhs.length) return false;
+    return crypto.timingSafeEqual(
+        Buffer.from(lhs, 'hex'),
+        Buffer.from(rhs, 'hex')
     );
 }
 
