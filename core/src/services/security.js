@@ -189,6 +189,15 @@ function checkLoginLock(identifier) {
         throw new Error(`账号已锁定，请${remaining}秒后重试`);
     }
 
+    // 锁定已过期，重置失败计数，避免下一次失败立即再次锁定
+    if (attempts.lockedUntil > 0 && attempts.lockedUntil <= now) {
+        attempts.count = 0;
+        attempts.lockedUntil = 0;
+        attempts.firstAttempt = now;
+        attempts.lastAttempt = 0;
+        loginAttempts.set(key, attempts);
+    }
+
     return {
         attemptsLeft: Math.max(0, SECURITY_CONFIG.maxLoginAttempts - attempts.count)
     };
@@ -199,6 +208,12 @@ function recordLoginFailure(identifier) {
     const now = Date.now();
 
     const attempts = loginAttempts.get(key) || { count: 0, firstAttempt: now, lockedUntil: 0 };
+
+    if (attempts.lockedUntil > 0 && attempts.lockedUntil <= now) {
+        attempts.count = 0;
+        attempts.lockedUntil = 0;
+        attempts.firstAttempt = now;
+    }
 
     attempts.count += 1;
     attempts.lastAttempt = now;
