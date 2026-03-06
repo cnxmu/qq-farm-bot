@@ -158,8 +158,8 @@ ADMIN_PASSWORD=请替换为强密码
 ACCOUNT_CODE_KEY=64位十六进制密钥（推荐，避免本地密钥文件）
 # 可选：仅在单机开发环境允许本地密钥文件回退
 # ACCOUNT_SECRET_ALLOW_LOCAL=1
-# 可选：会话存储模式 memory|file（默认 file）
-# ADMIN_SESSION_STORE=file
+# 可选：会话存储模式 memory|file（默认 memory）
+# ADMIN_SESSION_STORE=memory
 ```
 
 修改后执行 `docker compose up -d` 重启生效。

@@ -11,7 +11,7 @@ const logger = createModuleLogger('security');
 // 配置
 const SECURITY_CONFIG = {
     saltRounds: 12,           // bcrypt cost factor (4-31)
-    minPasswordLength: 4,
+    minPasswordLength: 12,
     maxPasswordLength: 64,
     enablePasswordStrengthCheck: true,
     maxLoginAttempts: 5,      // 最大登录尝试次数
@@ -165,30 +165,47 @@ function checkPasswordStrength(password) {
 }
 
 // 登录尝试记录
-function recordLoginAttempt(identifier) {
+function checkLoginLock(identifier) {
     const key = String(identifier || '').toLowerCase();
     const now = Date.now();
-    
+
     const attempts = loginAttempts.get(key) || { count: 0, firstAttempt: now, lockedUntil: 0 };
-    
+
     // 检查是否被锁定
     if (attempts.lockedUntil > now) {
         const remaining = Math.ceil((attempts.lockedUntil - now) / 1000);
         throw new Error(`账号已锁定，请${remaining}秒后重试`);
     }
-    
+
+    return {
+        attemptsLeft: Math.max(0, SECURITY_CONFIG.maxLoginAttempts - attempts.count)
+    };
+}
+
+function recordLoginFailure(identifier) {
+    const key = String(identifier || '').toLowerCase();
+    const now = Date.now();
+
+    const attempts = loginAttempts.get(key) || { count: 0, firstAttempt: now, lockedUntil: 0 };
+
     attempts.count += 1;
     attempts.lastAttempt = now;
-    
+
     // 连续失败5次，锁定5分钟
     if (attempts.count >= SECURITY_CONFIG.maxLoginAttempts) {
         attempts.lockedUntil = now + SECURITY_CONFIG.lockoutDuration;
+        loginAttempts.set(key, attempts);
         logger.warn('登录尝试过多，账号已锁定', { identifier: key });
-        throw new Error(`登录尝试过多，账号已锁定${SECURITY_CONFIG.lockoutDuration / 60000}分钟`);
+        return {
+            locked: true,
+            attemptsLeft: 0,
+            message: `登录尝试过多，账号已锁定${SECURITY_CONFIG.lockoutDuration / 60000}分钟`,
+        };
     }
-    
+
     loginAttempts.set(key, attempts);
     return {
+        locked: false,
         attemptsLeft: SECURITY_CONFIG.maxLoginAttempts - attempts.count
     };
 }
@@ -305,7 +322,10 @@ module.exports = {
     hashPassword,
     verifyPassword,
     checkPasswordStrength,
-    recordLoginAttempts: recordLoginAttempt,
+    checkLoginLock,
+    recordLoginFailure,
+    // 兼容旧接口，保留导出
+    recordLoginAttempts: recordLoginFailure,
     clearLoginAttempts,
     generateToken,
     generateSessionToken,

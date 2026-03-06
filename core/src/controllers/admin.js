@@ -1,4 +1,3 @@
-const crypto = require('node:crypto');
 /**
  * 管理面板 HTTP 服务
  * 改写为接收 DataProvider 模式
@@ -20,7 +19,10 @@ const { createModuleLogger } = require('../services/logger');
 const { MiniProgramLoginSession } = require('../services/qrlogin');
 const { sendPushooMessage } = require('../services/push');
 const { createSessionStore } = require('../services/session-store');
+const { createAdminAuthService } = require('../services/admin-auth');
 const { getSchedulerRegistrySnapshot } = require('../services/scheduler');
+const { registerAuthRoutes } = require('./routes/auth');
+const { registerQrRoutes } = require('./routes/qr');
 const { 
     hashPassword: secureHash, 
     verifyPassword,
@@ -28,7 +30,8 @@ const {
     SECURITY_CONFIG,
     passwordHashMiddleware,
     rateLimitMiddleware,
-    recordLoginAttempts,
+    checkLoginLock,
+    recordLoginFailure,
     clearLoginAttempts
 } = require('../services/security');
 
@@ -82,26 +85,15 @@ function startAdminServer(dataProvider) {
 
     const sessionStore = createSessionStore();
     const tokenTtlMs = Math.max(60 * 1000, Number(CONFIG.adminTokenTtlMs) || (24 * 60 * 60 * 1000));
+    const authService = createAdminAuthService({
+        sessionStore,
+        tokenTtlMs,
+        checkLoginLock,
+        recordLoginFailure,
+        clearLoginAttempts,
+    });
+    authService.startCleanupTimer();
     const allowedOrigins = parseAllowedOrigins();
-
-    const getTokenMeta = (rawToken) => {
-        const token = String(rawToken || '').trim();
-        if (!token) return null;
-        const meta = sessionStore.get(token);
-        if (!meta) return null;
-        if (meta.expiresAt <= Date.now()) {
-            sessionStore.delete(token);
-            return null;
-        }
-        return meta;
-    };
-
-    const issueToken = () => {
-        const token = crypto.randomBytes(24).toString('hex');
-        const now = Date.now();
-        sessionStore.set(token, { issuedAt: now, expiresAt: now + tokenTtlMs });
-        return token;
-    };
 
     const isOriginAllowed = (origin) => {
         const normalized = normalizeOrigin(origin);
@@ -109,22 +101,9 @@ function startAdminServer(dataProvider) {
         return allowedOrigins.has(normalized);
     };
 
-    const deleteToken = (rawToken) => {
-        const token = String(rawToken || '').trim();
-        if (!token) return;
-        sessionStore.delete(token);
-    };
-
-    setInterval(() => {
-        const now = Date.now();
-        for (const [token, meta] of sessionStore.entries()) {
-            if (!meta || meta.expiresAt <= now) sessionStore.delete(token);
-        }
-    }, Math.min(5 * 60 * 1000, tokenTtlMs));
-
     const authRequired = (req, res, next) => {
         const token = req.headers['x-admin-token'];
-        if (!getTokenMeta(token)) {
+        if (!authService.getTokenMeta(token)) {
             return res.status(401).json({ ok: false, error: 'Unauthorized' });
         }
         req.adminToken = String(token || '').trim();
@@ -163,83 +142,21 @@ function startAdminServer(dataProvider) {
     }
     app.use('/game-config', express.static(getResourcePath('gameConfig')));
 
-    // 登录与鉴权
-    app.post('/api/login', async (req, res) => {
-        const { password } = req.body || {};
-        
-        // 记录登录尝试
-        try {
-            recordLoginAttempts(req.ip);
-        } catch (error) {
-            return res.status(429).json({ ok: false, error: error.message });
-        }
-        
-        const input = String(password || '');
-        const storedHash = store.getAdminPasswordHash ? store.getAdminPasswordHash() : '';
-        const envAdminPassword = String(CONFIG.adminPassword || '');
-        let ok = false;
-        
-        if (storedHash) {
-            // 优先使用安全验证 (支持PBKDF2和SHA256)
-            ok = await verifyPassword(input, storedHash);
-        } else {
-            if (!envAdminPassword) {
-                return res.status(503).json({ ok: false, error: '管理员密码未初始化，请先设置 ADMIN_PASSWORD' });
-            }
-            ok = input === envAdminPassword;
-        }
-        
-        if (!ok) {
-            return res.status(401).json({ ok: false, error: 'Invalid password' });
-        }
-        
-        // 登录成功
-        clearLoginAttempts(req.ip);
-        const token = issueToken();
-        res.json({ ok: true, data: { token } });
-    });
-
-    app.use('/api', (req, res, next) => {
-        if (req.path === '/login' || req.path === '/qr/create' || req.path === '/qr/check' || req.path === '/auth/validate') return next();
-        return authRequired(req, res, next);
-    });
-
-    app.post('/api/admin/change-password', async (req, res) => {
-        const body = req.body || {};
-        const oldPassword = String(body.oldPassword || '');
-        const newPassword = String(body.newPassword || '');
-        const strength = checkPasswordStrength(newPassword);
-        if (!strength.valid) {
-            return res.status(400).json({ ok: false, error: strength.feedback[0] || '新密码不符合要求', feedback: strength.feedback });
-        }
-        if (newPassword.length > SECURITY_CONFIG.maxPasswordLength) {
-            return res.status(400).json({ ok: false, error: `新密码长度不能超过 ${SECURITY_CONFIG.maxPasswordLength} 位` });
-        }
-        const storedHash = store.getAdminPasswordHash ? store.getAdminPasswordHash() : '';
-        const ok = storedHash
-            ? await verifyPassword(oldPassword, storedHash)
-            : oldPassword === String(CONFIG.adminPassword || '');
-        if (!ok) {
-            return res.status(400).json({ ok: false, error: '原密码错误' });
-        }
-        const nextHash = await hashPassword(newPassword);
-        if (store.setAdminPasswordHash) {
-            store.setAdminPasswordHash(nextHash);
-        }
-        res.json({ ok: true });
+    registerAuthRoutes({
+        app,
+        authRequired,
+        authService,
+        store,
+        CONFIG,
+        getIO: () => io,
+        verifyPassword,
+        hashPassword,
+        checkPasswordStrength,
+        SECURITY_CONFIG,
     });
 
     app.get('/api/ping', (req, res) => {
         res.json({ ok: true, data: { ok: true, uptime: process.uptime(), version } });
-    });
-
-    app.get('/api/auth/validate', (req, res) => {
-        const token = String(req.headers['x-admin-token'] || '').trim();
-        const valid = !!token && !!getTokenMeta(token);
-        if (!valid) {
-            return res.status(401).json({ ok: false, data: { valid: false }, error: 'Unauthorized' });
-        }
-        res.json({ ok: true, data: { valid: true } });
     });
 
     // API: 调度任务快照（用于调度收敛排查）
@@ -254,21 +171,6 @@ function startAdminServer(dataProvider) {
         } catch (e) {
             return handleApiError(res, e);
         }
-    });
-
-    app.post('/api/logout', (req, res) => {
-        const token = req.adminToken;
-        if (token) {
-            deleteToken(token);
-            if (io) {
-                for (const socket of io.sockets.sockets.values()) {
-                    if (String(socket.data.adminToken || '') === String(token)) {
-                        socket.disconnect(true);
-                    }
-                }
-            }
-        }
-        res.json({ ok: true });
     });
 
     const getAccountList = () => {
@@ -780,50 +682,11 @@ function startAdminServer(dataProvider) {
         }
     });
 
-    // ============ QR Code Login APIs (无需账号选择) ============
-    // 这些接口不需要 authRequired 也能调用（用于登录流程）
-    app.post('/api/qr/create', async (req, res) => {
-        try {
-            const result = await MiniProgramLoginSession.requestLoginCode();
-            res.json({ ok: true, data: result });
-        } catch (e) {
-            res.status(500).json({ ok: false, error: e.message });
-        }
-    });
-
-    app.post('/api/qr/check', async (req, res) => {
-        const { code } = req.body || {};
-        if (!code) {
-            return res.status(400).json({ ok: false, error: 'Missing code' });
-        }
-
-        try {
-            const result = await MiniProgramLoginSession.queryStatus(code);
-
-            if (result.status === 'OK') {
-                const ticket = result.ticket;
-                const uin = result.uin || '';
-                const nickname = result.nickname || ''; // 获取昵称
-                const appid = '1112386029'; // Farm appid
-
-                const authCode = await MiniProgramLoginSession.getAuthCode(ticket, appid);
-
-                let avatar = '';
-                if (uin) {
-                    avatar = `https://q1.qlogo.cn/g?b=qq&nk=${uin}&s=640`;
-                }
-
-                res.json({ ok: true, data: { status: 'OK', code: authCode, uin, avatar, nickname } });
-            } else if (result.status === 'Used') {
-                res.json({ ok: true, data: { status: 'Used' } });
-            } else if (result.status === 'Wait') {
-                res.json({ ok: true, data: { status: 'Wait' } });
-            } else {
-                res.json({ ok: true, data: { status: 'Error', error: result.msg } });
-            }
-        } catch (e) {
-            res.status(500).json({ ok: false, error: e.message });
-        }
+    registerQrRoutes({
+        app,
+        authRequired,
+        MiniProgramLoginSession,
+        rateLimitMiddleware,
     });
 
     app.get('*', (req, res) => {
@@ -905,7 +768,7 @@ function startAdminServer(dataProvider) {
         if (!isOriginAllowed(origin)) {
             return next(new Error('Origin not allowed'));
         }
-        if (!token || !getTokenMeta(token)) {
+        if (!token || !authService.getTokenMeta(token)) {
             return next(new Error('Unauthorized'));
         }
         socket.data.adminToken = token;

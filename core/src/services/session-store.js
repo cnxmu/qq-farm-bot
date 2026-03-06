@@ -65,13 +65,12 @@ function createFileSessionStore(options = {}) {
 }
 
 function createSessionStore(options = {}) {
-    const modeRaw = options.mode || process.env.ADMIN_SESSION_STORE || 'file';
+    const modeRaw = options.mode || process.env.ADMIN_SESSION_STORE || 'memory';
     const mode = String(modeRaw).trim().toLowerCase();
-    if (mode === 'memory') return createMemorySessionStore();
-    return createFileSessionStore(options);
+    if (mode === 'file') return createFileSessionStore(options);
+    return createMemorySessionStore();
 }
 
 module.exports = {
     createSessionStore,
 };
-
