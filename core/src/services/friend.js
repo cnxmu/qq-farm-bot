@@ -41,6 +41,12 @@ const OP_NAMES = {
 
 let canGetHelpExp = true;
 let helpAutoDisabledByLimit = false;
+let friendGetAllCooldownUntil = 0;
+
+function isFriendGetAllParamError(error) {
+    const message = String((error && error.message) || error || '');
+    return message.includes('FriendService.GetAll') && message.includes('code=1000020');
+}
 
 function parseTimeToMinutes(timeStr) {
     const m = String(timeStr || '').match(/^(\d{1,2}):(\d{1,2})$/);
@@ -115,8 +121,16 @@ function addFriendToBlacklist(friendGid, friendName, reason = '') {
 
 async function getAllFriends() {
     const body = types.GetAllFriendsRequest.encode(types.GetAllFriendsRequest.create({})).finish();
-    const { body: replyBody } = await sendMsgAsync('gamepb.friendpb.FriendService', 'GetAll', body);
-    return types.GetAllFriendsReply.decode(replyBody);
+    try {
+        const { body: replyBody } = await sendMsgAsync('gamepb.friendpb.FriendService', 'GetAll', body);
+        return types.GetAllFriendsReply.decode(replyBody);
+    } catch (error) {
+        // 兼容部分版本：GetAll 参数校验变更，回退到 SyncAll
+        if (!isFriendGetAllParamError(error) || !types.SyncAllFriendsRequest || !types.SyncAllFriendsReply) throw error;
+        const fallbackBody = types.SyncAllFriendsRequest.encode(types.SyncAllFriendsRequest.create({ open_ids: [] })).finish();
+        const { body: replyBody } = await sendMsgAsync('gamepb.friendpb.FriendService', 'SyncAll', fallbackBody);
+        return types.SyncAllFriendsReply.decode(replyBody);
+    }
 }
 
 // ============ 好友申请 API (微信同玩) ============
@@ -873,7 +887,9 @@ async function checkFriends() {
     const hasAnyFriendOp = helpEnabled || stealEnabled || badEnabled;
     if (isCheckingFriends || !state.gid || !hasAnyFriendOp) return false;
     if (inFriendQuietHours()) return false;
-    
+    const now = Date.now();
+    if (friendGetAllCooldownUntil > now) return false;
+
     isCheckingFriends = true;
     checkDailyReset();
 
@@ -982,7 +998,12 @@ async function checkFriends() {
         return summary.length > 0;
 
     } catch (err) {
-        logWarn('好友', `巡查异常: ${err.message}`);
+        if (isFriendGetAllParamError(err)) {
+            friendGetAllCooldownUntil = Date.now() + 5 * 60 * 1000;
+            logWarn('好友', `巡查异常: ${err.message}；已暂停好友巡查 5 分钟（疑似协议参数变更，已尝试 SyncAll 回退）`);
+        } else {
+            logWarn('好友', `巡查异常: ${err.message}`);
+        }
         return false;
     } finally {
         isCheckingFriends = false;
@@ -1004,6 +1025,7 @@ function startFriendCheckLoop(options = {}) {
     if (friendLoopRunning) return;
     externalSchedulerMode = !!options.externalScheduler;
     friendLoopRunning = true;
+    friendGetAllCooldownUntil = 0;
 
     // 注册操作限制更新回调，从农场检查中获取限制信息
     setOperationLimitsCallback(updateOperationLimits);
@@ -1022,6 +1044,7 @@ function startFriendCheckLoop(options = {}) {
 
 function stopFriendCheckLoop() {
     friendLoopRunning = false;
+    friendGetAllCooldownUntil = 0;
     externalSchedulerMode = false;
     networkEvents.off('friendApplicationReceived', onFriendApplicationReceived);
     friendScheduler.clearAll();
