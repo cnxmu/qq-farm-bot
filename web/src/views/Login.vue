@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useStorage } from '@vueuse/core'
+import { useSessionStorage } from '@vueuse/core'
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/api'
@@ -10,7 +10,7 @@ const router = useRouter()
 const password = ref('')
 const error = ref('')
 const loading = ref(false)
-const token = useStorage('admin_token', '')
+const token = useSessionStorage('admin_token', '')
 
 async function handleLogin() {
   loading.value = true
